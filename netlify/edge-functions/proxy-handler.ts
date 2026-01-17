@@ -63,31 +63,117 @@ function rewritePaths(content: string, targetDomain: string, proxyPrefix: string
 
 // HTML 路径重写
 function rewriteHtmlPaths(content: string, targetDomain: string, proxyBaseUrl: string, targetPathBase: string): string {
-  // 1. 统一处理所有属性中的绝对路径引用（包含目标域名的）
-  const attrPattern = new RegExp(
-    `(href|src|action|content|data-src|data-href|poster|background|cite|formaction|ping|manifest)=["']((?:https?:)?//${targetDomain.replace(/\./g, '\\.')}([^"']*)?)["']`,
-    'gi'
+  
+  // 定义应该重写的 HTML 标签和属性
+  const URL_ATTRIBUTES = {
+    // link 标签
+    'link': ['href'],
+    // script 标签
+    'script': ['src'],
+    // img 标签
+    'img': ['src', 'srcset'],
+    // video 标签
+    'video': ['src', 'poster'],
+    // audio 标签
+    'audio': ['src'],
+    // source 标签
+    'source': ['src', 'srcset'],
+    // iframe 标签
+    'iframe': ['src'],
+    // a 标签
+    'a': ['href'],
+    // area 标签
+    'area': ['href'],
+    // base 标签
+    'base': ['href'],
+    // form 标签
+    'form': ['action'],
+    // input 标签
+    'input': ['src', 'formaction'],
+    // button 标签
+    'button': ['formaction'],
+    // object 标签
+    'object': ['data'],
+    // embed 标签
+    'embed': ['src'],
+    // track 标签
+    'track': ['src'],
+    // blockquote 标签
+    'blockquote': ['cite'],
+    // q 标签
+    'q': ['cite'],
+    // ins 标签
+    'ins': ['cite'],
+    // del 标签
+    'del': ['cite'],
+  };
+
+  // 1. 处理 <link> 标签的 href 属性（包括 preconnect、dns-prefetch）
+  content = content.replace(
+    /<link\s+([^>]*?)\s*(?:href|data-href)=["']((?:https?:)?\/\/)?([^"']*?)["']([^>]*?)>/gi,
+    (match, before, protocol, url, after) => {
+      // 检查是否是外部域名（如 abs.twimg.com）
+      if (url && (url.includes('.') || url.includes(':'))) {
+        // 如果是外部域名，不重写
+        return match;
+      }
+      // 如果是根路径，添加代理前缀
+      if (url && url.startsWith('/')) {
+        return `<link ${before} href="${proxyBaseUrl}${url}"${after}>`;
+      }
+      return match;
+    }
   );
-  content = content.replace(attrPattern, (match, attr, url, path) => {
-    if (url.startsWith('//')) {
+
+  // 2. 处理包含目标域名的绝对 URL（排除 meta 标签）
+  content = content.replace(
+    new RegExp(
+      `<(?!meta)([^>]*?)\\s*(href|src|action|data-href|data-src|poster|cite|formaction|manifest)=["']((?:https?:)?//${targetDomain.replace(/\./g, '\\.')})([^"']*?)["']`,
+      'gi'
+    ),
+    (match, tag, attr, protocol, path) => {
       return `${attr}="${proxyBaseUrl}${path}"`;
     }
-    return `${attr}="${proxyBaseUrl}${path}"`;
+  );
+
+  // 3. 处理根路径引用（只对特定标签的属性，排除 meta 标签）
+  const rootPathPattern = /<(?!meta)(a|link|script|img|video|audio|source|iframe|area|form|input|button|object|embed|track|blockquote|q|ins|del)\s+([^>]*?)\s*(href|src|action|data-href|data-src|poster|cite|formaction|manifest)=["']\/([^"']*)["']([^>]*?)>/gi;
+  content = content.replace(rootPathPattern, (match, tag, before, attr, path, after) => {
+    return `<${tag} ${before}${attr}="${proxyBaseUrl}/${path}"${after}>`;
   });
 
-  // 2. 处理根路径引用（以 / 开头但不是 // 的）
+  // 4. 处理相对路径（只对特定标签的属性，排除 meta 标签）
+  const relativePathPattern = /<(?!meta)(a|link|script|img|video|audio|source|iframe|area|form|input|button|object|embed|track|blockquote|q|ins|del)\s+([^>]*?)\s*(href|src|action|data-href|data-src|poster|cite|formaction|manifest)=["']((?![a-z]+:|\/\/|\/)([^"']*?\.(?:js|css|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|json|xml|html|htm|mp4|webm|mp3|ogg|wav))["']([^>]*?)>/gi;
+  content = content.replace(relativePathPattern, (match, tag, before, attr, path, after) => {
+    return `<${tag} ${before}${attr}="${proxyBaseUrl}${targetPathBase}${path}"${after}>`;
+  });
+
+  // 5. 处理 srcset 属性
   content = content.replace(
-    /(href|src|action|content|data-src|data-href|poster|background|cite|formaction|ping|manifest)=["']\/([^"']*)["']/gi,
-    `$1="${proxyBaseUrl}/$2"`
+    /srcset=["']([^"']+)["']/gi,
+    (match, srcset) => {
+      return `srcset="${srcset.split(',').map(item => {
+        const parts = item.trim().split(/\s+/);
+        const src = parts[0];
+        const descriptor = parts.slice(1).join(' ');
+        
+        if (src.startsWith('/') && !src.startsWith('//')) {
+          return `${proxyBaseUrl}${src}${descriptor ? ' ' + descriptor : ''}`;
+        }
+        return item;
+      }).join(', ')}"`;
+    }
   );
 
-  // 3. 处理相对路径（不以 / 或 http:// 或 https:// 开头的）
+  // 6. 处理 <base> 标签
   content = content.replace(
-    /(href|src|action|content|data-src|data-href|poster|background|cite|formaction|ping|manifest)=["']((?![a-z]+:|\/\/|\/)([^"']*))["']/gi,
-    `$1="${proxyBaseUrl}${targetPathBase}$2"`
+    /<base\s+[^>]*href=["'][^"']*["'][^>]*>/gi,
+    (match) => {
+      return match.replace(/href=["'][^"']*["']/gi, `href="${proxyBaseUrl}/"`);
+    }
   );
 
-  // 4. 处理 CSS 中的 url() - 更全面的匹配
+  // 7. 处理 style 标签和 style 属性中的 url()
   content = content.replace(
     /url\(['"]?([^'")]+)['"]?\)/gi,
     (match, url) => {
@@ -113,38 +199,21 @@ function rewriteHtmlPaths(content: string, targetDomain: string, proxyBaseUrl: s
         return `url("${proxyBaseUrl}${url}")`;
       }
 
-      // 相对路径保持不变（浏览器会相对于 CSS 文件解析）
+      // 相对路径保持不变
       return match;
     }
   );
 
-  // 5. 处理 srcset 属性
+  // 8. 处理内联 JavaScript 中的字符串路径（只在 script 标签内）
   content = content.replace(
-    /srcset=["']([^"']+)["']/gi,
-    (match, srcset) => {
-      return `srcset="${srcset.split(',').map(item => {
-        const parts = item.trim().split(/\s+/);
-        const src = parts[0];
-        const descriptor = parts.slice(1).join(' ');
-        
-        if (src.startsWith('/') && !src.startsWith('//')) {
-          return `${proxyBaseUrl}${src}${descriptor ? ' ' + descriptor : ''}`;
-        }
-        return item;
-      }).join(', ')}"`;
+    /<script[^>]*>([\s\S]*?)<\/script>/gi,
+    (match, scriptContent) => {
+      const newScriptContent = scriptContent.replace(
+        /(['"])(\/[^'"]*?\.(?:js|css|png|jpg|jpeg|gif|svg|webp|ico|json|xml|html|htm))(['"])/gi,
+        `$1${proxyBaseUrl}$2$3`
+      );
+      return `<script>${newScriptContent}</script>`;
     }
-  );
-
-  // 6. 处理 <base> 标签
-  content = content.replace(
-    /<base[^>]*href=["'][^"']*["'][^>]*>/gi,
-    `<base href="${proxyBaseUrl}/">`
-  );
-
-  // 7. 处理内联 JavaScript 中的字符串路径
-  content = content.replace(
-    /(['"])(\/[^'"]*?\.(?:js|css|png|jpg|jpeg|gif|svg|webp|ico|json|xml|html|htm))(['"])/gi,
-    `$1${proxyBaseUrl}$2$3`
   );
 
   return content;
