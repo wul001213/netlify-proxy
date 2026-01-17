@@ -19,7 +19,9 @@ const PROXY_CONFIG = {
   "/portkey": "https://api.portkey.ai",
   "/fireworks": "https://api.fireworks.ai",
   "/openrouter": "https://openrouter.ai/api",
-  // 任意网址
+  // 网站代理
+  "/x": "https://x.com",
+  "/twitter": "https://twitter.com",
   "/hexo": "https://hexo-gally.vercel.app",
   "/hexo2": "https://hexo-987.pages.dev",
   "/halo": "https://blog.gally.dpdns.org",
@@ -61,9 +63,9 @@ function rewritePaths(content: string, targetDomain: string, proxyPrefix: string
 
 // HTML 路径重写
 function rewriteHtmlPaths(content: string, targetDomain: string, proxyBaseUrl: string, targetPathBase: string): string {
-  // 统一处理所有属性中的路径引用
+  // 1. 统一处理所有属性中的绝对路径引用（包含目标域名的）
   const attrPattern = new RegExp(
-    `(href|src|action|content|data-src|data-href|poster|background)=["']((?:https?:)?//${targetDomain.replace(/\./g, '\\.')}([^"']*)?)["']`,
+    `(href|src|action|content|data-src|data-href|poster|background|cite|formaction|ping|manifest)=["']((?:https?:)?//${targetDomain.replace(/\./g, '\\.')}([^"']*)?)["']`,
     'gi'
   );
   content = content.replace(attrPattern, (match, attr, url, path) => {
@@ -73,54 +75,76 @@ function rewriteHtmlPaths(content: string, targetDomain: string, proxyBaseUrl: s
     return `${attr}="${proxyBaseUrl}${path}"`;
   });
 
-  // 处理根路径引用
+  // 2. 处理根路径引用（以 / 开头但不是 // 的）
   content = content.replace(
-    /(href|src|action|content|data-src|data-href)=["']\/([^"']*)["']/gi,
+    /(href|src|action|content|data-src|data-href|poster|background|cite|formaction|ping|manifest)=["']\/([^"']*)["']/gi,
     `$1="${proxyBaseUrl}/$2"`
   );
 
-  // 处理相对路径
+  // 3. 处理相对路径（不以 / 或 http:// 或 https:// 开头的）
   content = content.replace(
-    /(href|src|action|content|data-src|data-href)=["']((?![a-z]+:|\/\/|\/)([^"']*))["']/gi,
+    /(href|src|action|content|data-src|data-href|poster|background|cite|formaction|ping|manifest)=["']((?![a-z]+:|\/\/|\/)([^"']*))["']/gi,
     `$1="${proxyBaseUrl}${targetPathBase}$2"`
   );
 
-  // 处理 CSS 中的 url()
+  // 4. 处理 CSS 中的 url() - 更全面的匹配
   content = content.replace(
-    /url\(['"]?(?:(?:https?:)?\/\/)?[^'")]*\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)['"]?\)/gi,
-    (match) => {
-      const urlMatch = match.match(/url\(['"]?([^'")]+)['"]?\)/i);
-      if (urlMatch && urlMatch[1]) {
-        const url = urlMatch[1];
-        if (url.startsWith('//') || url.includes(targetDomain)) {
-          const cleanUrl = url.replace(/^(?:https?:)?\/\/[^\/]+/, '');
-          return `url("${proxyBaseUrl}${cleanUrl}")`;
-        } else if (url.startsWith('/')) {
-          return `url("${proxyBaseUrl}${url}")`;
-        }
+    /url\(['"]?([^'")]+)['"]?\)/gi,
+    (match, url) => {
+      // 跳过 data: URL 和 #
+      if (url.startsWith('data:') || url.startsWith('#')) {
+        return match;
       }
+
+      // 处理包含目标域名的 URL
+      if (url.includes(targetDomain)) {
+        const cleanUrl = url.replace(/^(?:https?:)?\/\/[^\/]+/, '');
+        return `url("${proxyBaseUrl}${cleanUrl}")`;
+      }
+
+      // 处理协议相对 URL
+      if (url.startsWith('//')) {
+        const cleanUrl = url.replace(/^\/\/[^\/]+/, '');
+        return `url("${proxyBaseUrl}${cleanUrl}")`;
+      }
+
+      // 处理根路径
+      if (url.startsWith('/')) {
+        return `url("${proxyBaseUrl}${url}")`;
+      }
+
+      // 相对路径保持不变（浏览器会相对于 CSS 文件解析）
       return match;
     }
   );
 
-  // 处理 srcset
+  // 5. 处理 srcset 属性
   content = content.replace(
     /srcset=["']([^"']+)["']/gi,
     (match, srcset) => {
       return `srcset="${srcset.split(',').map(item => {
-        const [src, ...desc] = item.trim().split(/\s+/);
+        const parts = item.trim().split(/\s+/);
+        const src = parts[0];
+        const descriptor = parts.slice(1).join(' ');
+        
         if (src.startsWith('/') && !src.startsWith('//')) {
-          return `${proxyBaseUrl}${src}${desc.length ? ' ' + desc.join(' ') : ''}`;
+          return `${proxyBaseUrl}${src}${descriptor ? ' ' + descriptor : ''}`;
         }
         return item;
       }).join(', ')}"`;
     }
   );
 
-  // 处理 <base> 标签
+  // 6. 处理 <base> 标签
   content = content.replace(
     /<base[^>]*href=["'][^"']*["'][^>]*>/gi,
     `<base href="${proxyBaseUrl}/">`
+  );
+
+  // 7. 处理内联 JavaScript 中的字符串路径
+  content = content.replace(
+    /(['"])(\/[^'"]*?\.(?:js|css|png|jpg|jpeg|gif|svg|webp|ico|json|xml|html|htm))(['"])/gi,
+    `$1${proxyBaseUrl}$2$3`
   );
 
   return content;
@@ -168,6 +192,18 @@ function rewriteJsPaths(content: string, targetDomain: string, proxyBaseUrl: str
     `$1${proxyBaseUrl}$2$1`
   );
 
+  // 替换根路径 URL (处理 / 开头的路径)
+  content = content.replace(
+    /(['"])(\/[^'"]*?\.(?:js|css|png|jpg|jpeg|gif|svg|webp|ico|json|xml|html|htm))(['"])/gi,
+    `$1${proxyBaseUrl}$2$3`
+  );
+
+  // 替换 API 路径 (处理 /api/ 开头的路径)
+  content = content.replace(
+    /(['"])(\/api\/[^'"]*?)(['"])/gi,
+    `$1${proxyBaseUrl}$2$3`
+  );
+
   return content;
 }
 
@@ -177,6 +213,8 @@ function generateFixScript(proxyPrefix: string, origin: string): string {
   return `
 <script>
 (function() {
+  'use strict';
+  
   // 获取当前代理前缀
   const PROXY_PREFIX = '${proxyPrefix}';
   const PROXY_BASE_URL = '${proxyBaseUrl}';
@@ -184,7 +222,7 @@ function generateFixScript(proxyPrefix: string, origin: string): string {
   // 修复 URL 的工具函数
   function fixUrl(url) {
     if (!url || typeof url !== 'string') return url;
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:') || url.startsWith('#')) {
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:') || url.startsWith('#') || url.startsWith('blob:')) {
       return url;
     }
     if (url.startsWith('/')) {
@@ -198,57 +236,80 @@ function generateFixScript(proxyPrefix: string, origin: string): string {
   window.fetch = function(resource, init) {
     if (typeof resource === 'string' && resource.startsWith('/')) {
       resource = PROXY_BASE_URL + resource;
+    } else if (resource instanceof Request && resource.url && resource.url.startsWith('/')) {
+      const newResource = new Request(PROXY_BASE_URL + resource.url, resource);
+      return originalFetch.call(this, newResource, init);
     }
     return originalFetch.call(this, resource, init);
   };
 
   // 拦截 XMLHttpRequest
   const originalOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {
+  XMLHttpRequest.prototype.open = function(method, url, ...args) {
     if (typeof url === 'string' && url.startsWith('/')) {
       url = PROXY_BASE_URL + url;
     }
-    return originalOpen.call(this, method, url);
+    return originalOpen.call(this, method, url, ...args);
   };
+
+  // 拦截 WebSocket（如果需要）
+  if (window.WebSocket) {
+    const originalWebSocket = window.WebSocket;
+    window.WebSocket = function(url, ...args) {
+      if (typeof url === 'string' && url.startsWith('/')) {
+        // 将 ws:// 或 wss:// 转换为代理 URL
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        url = protocol + '//' + window.location.host + PROXY_BASE_URL + url;
+      }
+      return new originalWebSocket(url, ...args);
+    };
+  }
+
+  // 修复元素的属性
+  function fixElementAttributes(el) {
+    const attrs = ['src', 'href', 'action', 'data-src', 'data-href', 'poster', 'background', 'cite', 'formaction', 'ping', 'manifest'];
+    attrs.forEach(function(attr) {
+      if (el.hasAttribute && el.hasAttribute(attr)) {
+        const value = el.getAttribute(attr);
+        if (value && value.startsWith('/')) {
+          el.setAttribute(attr, PROXY_BASE_URL + value);
+        }
+      }
+    });
+  }
+
+  // 修复内联样式
+  function fixInlineStyle(el) {
+    if (!el.style || !el.style.cssText) return;
+    const style = el.style.cssText;
+    const newStyle = style.replace(/url\(['"]?\/[^)'"]*?['"]?\)/gi, function(match) {
+      const urlMatch = match.match(/url\(['"]?([^'")]+)['"]?\)/i);
+      if (urlMatch && urlMatch[1] && urlMatch[1].startsWith('/')) {
+        return 'url("' + PROXY_BASE_URL + urlMatch[1] + '")';
+      }
+      return match;
+    });
+    if (style !== newStyle) {
+      el.style.cssText = newStyle;
+    }
+  }
 
   // 监听 DOM 变化，修复动态添加的元素
   const observer = new MutationObserver(function(mutations) {
     mutations.forEach(function(mutation) {
       mutation.addedNodes.forEach(function(node) {
-        if (node.nodeType === 1) {
-          // 修复标签属性
-          const attrs = ['src', 'href', 'action', 'data-src', 'data-href', 'poster', 'background'];
-          attrs.forEach(function(attr) {
-            if (node.hasAttribute && node.hasAttribute(attr)) {
-              const value = node.getAttribute(attr);
-              if (value && value.startsWith('/')) {
-                node.setAttribute(attr, PROXY_BASE_URL + value);
-              }
-            }
-          });
+        if (node.nodeType === 1) { // 元素节点
+          // 修复当前节点
+          fixElementAttributes(node);
+          fixInlineStyle(node);
 
           // 修复子元素
-          const elements = node.querySelectorAll ? node.querySelectorAll('[' + attrs.join('],[') + ']') : [];
-          elements.forEach(function(el) {
-            attrs.forEach(function(attr) {
-              if (el.hasAttribute(attr)) {
-                const value = el.getAttribute(attr);
-                if (value && value.startsWith('/')) {
-                  el.setAttribute(attr, PROXY_BASE_URL + value);
-                }
-              }
+          if (node.querySelectorAll) {
+            const elements = node.querySelectorAll('*');
+            elements.forEach(function(el) {
+              fixElementAttributes(el);
+              fixInlineStyle(el);
             });
-          });
-
-          // 修复内联样式
-          if (node.style && node.style.cssText) {
-            const style = node.style.cssText;
-            const newStyle = style.replace(/url\\(['"]?\\/[^)'"]*?['"]?\\)/gi, function(match) {
-              return match.replace(/url\\(['"]?\\//, 'url("' + PROXY_BASE_URL + '/');
-            });
-            if (style !== newStyle) {
-              node.style.cssText = newStyle;
-            }
           }
         }
       });
@@ -271,15 +332,31 @@ function generateFixScript(proxyPrefix: string, origin: string): string {
   }
 
   // 修复页面加载时的元素
-  document.querySelectorAll('script[src], link[href], img[src], a[href], iframe[src], video[src], audio[src]').forEach(function(el) {
-    ['src', 'href'].forEach(function(attr) {
-      if (el.hasAttribute(attr)) {
-        const value = el.getAttribute(attr);
-        if (value && value.startsWith('/')) {
-          el.setAttribute(attr, PROXY_BASE_URL + value);
+  document.querySelectorAll('*').forEach(function(el) {
+    fixElementAttributes(el);
+    fixInlineStyle(el);
+  });
+
+  // 监听属性变化
+  const attrObserver = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      if (mutation.type === 'attributes') {
+        const el = mutation.target;
+        const attr = mutation.attributeName;
+        if (['src', 'href', 'action', 'data-src', 'data-href', 'poster', 'background', 'cite', 'formaction', 'ping', 'manifest'].includes(attr)) {
+          const value = el.getAttribute(attr);
+          if (value && value.startsWith('/')) {
+            el.setAttribute(attr, PROXY_BASE_URL + value);
+          }
         }
       }
     });
+  });
+
+  attrObserver.observe(document.documentElement, {
+    attributes: true,
+    subtree: true,
+    attributeFilter: ['src', 'href', 'action', 'data-src', 'data-href', 'poster', 'background', 'cite', 'formaction', 'ping', 'manifest']
   });
 })();
 </script>`;
@@ -508,7 +585,7 @@ async function buildProxyResponse(
 
 // 判断是否需要重写内容
 function shouldRewriteContent(contentType: string, pathname: string): boolean {
-  // 检查内容类型
+  // 检查内容类型 - 优先检查明确的文本类型
   if (HTML_CONTENT_TYPES.some(t => contentType.includes(t))) {
     return true;
   }
@@ -519,15 +596,27 @@ function shouldRewriteContent(contentType: string, pathname: string): boolean {
     return true;
   }
 
-  // 检查文件扩展名
+  // 检查文件扩展名 - 二进制文件不重写
   const ext = pathname.split('.').pop()?.toLowerCase();
   if (ext && BINARY_EXTENSIONS.has(ext)) {
     return false;
   }
 
-  // 检查是否是文本类型
-  if (contentType.startsWith('text/') || contentType.includes('json') || contentType.includes('xml')) {
+  // 检查是否是文本类型（包括 JSON、XML 等）
+  if (contentType.startsWith('text/') || 
+      contentType.includes('json') || 
+      contentType.includes('xml') || 
+      contentType.includes('javascript') ||
+      contentType.includes('+json') ||
+      contentType.includes('+xml')) {
     return true;
+  }
+
+  // 如果没有 content-type 或者是 application/octet-stream，根据扩展名判断
+  if (!contentType || contentType.includes('octet-stream')) {
+    if (ext && ['js', 'css', 'html', 'htm', 'json', 'xml', 'svg'].includes(ext)) {
+      return true;
+    }
   }
 
   return false;
@@ -558,8 +647,29 @@ function copyHeaders(
   targetHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Range');
   targetHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Content-Disposition');
 
-  // 移除安全头部
-  targetHeaders.delete('Content-Security-Policy');
+  // 修改 CSP 以允许内联脚本和从代理加载资源
+  const csp = sourceHeaders.get('Content-Security-Policy');
+  if (csp) {
+    // 保留 CSP 但修改它以允许代理
+    const modifiedCsp = csp
+      .replace(/script-src[^;]*/gi, 'script-src * \'unsafe-inline\' \'unsafe-eval\' data: blob:')
+      .replace(/style-src[^;]*/gi, 'style-src * \'unsafe-inline\'')
+      .replace(/img-src[^;]*/gi, 'img-src * data: blob:')
+      .replace(/connect-src[^;]*/gi, 'connect-src * blob:')
+      .replace(/font-src[^;]*/gi, 'font-src * data:')
+      .replace(/media-src[^;]*/gi, 'media-src * blob:')
+      .replace(/object-src[^;]*/gi, 'object-src *')
+      .replace(/frame-src[^;]*/gi, 'frame-src *')
+      .replace(/worker-src[^;]*/gi, 'worker-src * blob:')
+      .replace(/base-uri[^;]*/gi, 'base-uri *')
+      .replace(/form-action[^;]*/gi, 'form-action *')
+      .replace(/manifest-src[^;]*/gi, 'manifest-src *');
+    targetHeaders.set('Content-Security-Policy', modifiedCsp);
+  } else {
+    // 如果没有 CSP，添加一个宽松的
+    targetHeaders.set('Content-Security-Policy', "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; style-src * 'unsafe-inline'; img-src * data: blob:; connect-src * blob:; font-src * data:; media-src * blob:; object-src *; frame-src *; worker-src * blob:;");
+  }
+
   targetHeaders.delete('Content-Security-Policy-Report-Only');
   targetHeaders.delete('X-Frame-Options');
   targetHeaders.delete('X-Content-Type-Options');
